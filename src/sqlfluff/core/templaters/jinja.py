@@ -142,7 +142,7 @@ class JinjaTemplater(PythonTemplater):
         from jinja2.runtime import Macro
 
         # Iterate through keys exported from the loaded template string
-        context: dict[str, DbtMacroWrapper] = {}
+        macros: dict[str, Macro] = {}
         # NOTE: `env.from_string()` will raise TemplateSyntaxError if `template`
         # is invalid.
         macro_template = env.from_string(template, globals=ctx)
@@ -153,13 +153,31 @@ class JinjaTemplater(PythonTemplater):
                 attr = getattr(macro_template.module, k)
                 # Is it a macro? If so install it at the name of the macro
                 if isinstance(attr, Macro):
-                    context[k] = DbtMacroWrapper(attr)
+                    macros[k] = attr
         except UndefinedError:
             # This occurs if any file in the macro path references an
             # undefined Jinja variable. It's safe to ignore this. Any
             # meaningful issues will surface later at linting time.
             pass
-        # Return the context
+
+        context = {name: DbtMacroWrapper(macro) for name, macro in macros.items()}
+
+        # Jinja compiles references to macros in the same file into closure
+        # cells, bypassing the context where the wrappers are installed. Wrap
+        # those references too, so dbt's return() is caught by the nested macro
+        # instead of being returned by its caller.
+        macro_wrappers = {id(macro): context[name] for name, macro in macros.items()}
+        for macro in macros.values():
+            for cell in macro._func.__closure__ or ():
+                try:
+                    cell_value = cell.cell_contents
+                except ValueError:
+                    continue
+                if isinstance(cell_value, Macro):
+                    wrapper = macro_wrappers.get(id(cell_value))
+                    if wrapper:
+                        cell.cell_contents = wrapper
+
         return context
 
     @classmethod

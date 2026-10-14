@@ -670,6 +670,42 @@ def test__templater_jinja_dbt_builtin_function():
     assert len(vs) == 0
 
 
+def test__templater_jinja_dbt_return_in_nested_macro(tmp_path):
+    """Test that dbt's return() value is caught at each macro boundary."""
+    macros_path = tmp_path / "macros"
+    macros_path.mkdir()
+    (macros_path / "macros.sql").write_text(
+        "{% macro nested() %}{% do return({'a': 'x', 'b': 'y'}) %}{% endmacro %}"
+        "{% macro outer(in_col, out_col) %}"
+        "{% set nested_value = nested() %}"
+        "CASE {{ in_col }} "
+        "{% for key, value in nested_value.items() %}"
+        "WHEN {{ key }} THEN {{ value }} "
+        "{% endfor %}"
+        "END AS {{ out_col }}"
+        "{% endmacro %}"
+    )
+    config = FluffConfig.from_string(
+        "[sqlfluff]\n"
+        "dialect = bigquery\n"
+        "templater = jinja\n"
+        "[sqlfluff:templater:jinja]\n"
+        "apply_dbt_builtins = True\n"
+        f"load_macros_from_path = {macros_path.as_posix()}\n"
+    )
+
+    outstr, violations = JinjaTemplater().process(
+        in_str="SELECT {{ outer('input', 'output') }} FROM my_table;",
+        fname=str(tmp_path / "model.sql"),
+        config=config,
+    )
+
+    assert str(outstr) == (
+        "SELECT CASE input WHEN a THEN x WHEN b THEN y END AS output FROM my_table;"
+    )
+    assert not violations
+
+
 def test__templater_jinja_error_syntax():
     """Test syntax problems in the jinja templater."""
     t = JinjaTemplater()
